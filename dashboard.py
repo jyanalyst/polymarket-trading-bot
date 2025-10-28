@@ -118,11 +118,39 @@ stats = st.session_state.bot.get_stats()
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
-    st.metric(
-        "Large Orders Detected",
-        stats['total_large_orders'],
-        delta=None
-    )
+    st.subheader("🔔 Recent Large Orders")
+    
+    # Read from CSV
+    try:
+        if large_orders_file.exists():
+            df_orders = pd.read_csv(large_orders_file)
+            
+            if not df_orders.empty:
+                # Get last 20 orders
+                df_orders = df_orders.tail(20).sort_values('timestamp', ascending=False)
+                
+                # Format columns for display
+                df_display = df_orders[['timestamp', 'outcome', 'side', 'price', 'size', 'total_value']].copy()
+                df_display.columns = ['Time', 'Outcome', 'Side', 'Price', 'Size', 'Value']
+                
+                # Format timestamp
+                df_display['Time'] = pd.to_datetime(df_display['Time']).dt.strftime('%H:%M:%S')
+                df_display['Outcome'] = df_display['Outcome'].apply(lambda x: str(x)[:15] if pd.notna(x) else 'N/A')
+                df_display['Price'] = df_display['Price'].apply(lambda x: f"${x:.4f}")
+                df_display['Size'] = df_display['Size'].apply(lambda x: f"{x:.0f}")
+                df_display['Value'] = df_display['Value'].apply(lambda x: f"${x:,.0f}")
+                
+                st.dataframe(
+                    df_display,
+                    hide_index=True,
+                    use_container_width=True
+                )
+            else:
+                st.info("No large orders detected yet")
+        else:
+            st.info("No large orders detected yet")
+    except Exception as e:
+        st.error(f"Error loading orders: {e}")
 
 with col2:
     st.metric(

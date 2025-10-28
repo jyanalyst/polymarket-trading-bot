@@ -1,7 +1,7 @@
 # File: polymarket_trader.py
 """
 Polymarket Trading Bot - CSV Storage Version
-Simple CSV-based data persistence
+Simple CSV-based data persistence with fixed outcome parsing
 """
 
 import requests
@@ -12,6 +12,7 @@ import threading
 import logging
 import pandas as pd
 import os
+import json
 from pathlib import Path
 
 # Configure logging
@@ -33,7 +34,8 @@ class PolymarketTrader:
             config = {
                 'large_order_threshold': 1000,
                 'max_position_size': 5000,
-                'markets_to_watch': []
+                'markets_to_watch': [],
+                'min_liquidity': 1000  # Minimum liquidity to consider
             }
         
         self.config = config
@@ -42,6 +44,7 @@ class PolymarketTrader:
         self.is_running = False
         self.positions = {}
         self.logs = []  # In-memory logs
+        self.debug_mode = True  # Enable debug logging
         
         # Initialize CSV storage
         self.data_dir = Path('data')
@@ -61,7 +64,7 @@ class PolymarketTrader:
         if not self.large_orders_file.exists():
             df = pd.DataFrame(columns=[
                 'timestamp', 'market_id', 'token_id', 'side', 
-                'price', 'size', 'total_value', 'outcome'
+                'price', 'size', 'total_value', 'outcome', 'question'
             ])
             df.to_csv(self.large_orders_file, index=False)
             logging.info("✅ Created large_orders.csv")
@@ -78,20 +81,65 @@ class PolymarketTrader:
         logging.info("📁 CSV storage initialized")
     
     def get_markets(self) -> List[Dict]:
-        """Fetch markets to watch"""
+        """Fetch markets to watch - focusing on high liquidity, active markets"""
         url = f"{self.gamma_api}/markets"
-        params = {"limit": 20, "active": True}
+        
+        # Try to get markets sorted by liquidity/volume
+        params = {
+            "limit": 100,  # Get more markets to filter from
+            "active": "true",
+            "closed": "false"
+        }
         
         try:
             response = requests.get(url, params=params, timeout=10)
             response.raise_for_status()
-            return response.json()
+            markets = response.json()
+            
+            # Debug: Print first market's structure (only outcomes field)
+            if self.debug_mode and markets and len(markets) > 0:
+                sample_market = markets[0]
+                logging.info(f"📊 Sample outcomes field: {sample_market.get('outcomes')}")
+                logging.info(f"📊 Sample outcomes type: {type(sample_market.get('outcomes'))}")
+                self.debug_mode = False  # Only log once
+            
+            # Filter for markets with liquidity
+            min_liquidity = self.config.get('min_liquidity', 1000)
+            active_markets = []
+            
+            for market in markets:
+                try:
+                    liquidity = float(market.get('liquidity', 0))
+                    
+                    # Check if market has clobTokenIds
+                    if liquidity > min_liquidity and 'clobTokenIds' in market:
+                        active_markets.append(market)
+                        
+                        # Log first few active markets
+                        if len(active_markets) <= 3:
+                            logging.info(f"✅ Active market: {market.get('question', 'N/A')[:60]}... (Liquidity: ${liquidity:,.0f})")
+                
+                except (ValueError, TypeError):
+                    continue
+            
+            if not active_markets:
+                logging.warning(f"⚠️ No active markets with liquidity > ${min_liquidity} found")
+            else:
+                logging.info(f"📈 Found {len(active_markets)} active markets with sufficient liquidity")
+            
+            return active_markets
+            
         except Exception as e:
             logging.error(f"Error fetching markets: {e}")
             return []
     
     def get_order_book(self, token_id: str) -> Optional[Dict]:
         """Get order book for a token"""
+        # Validate token_id
+        if not token_id or not isinstance(token_id, str) or len(token_id) < 10:
+            logging.warning(f"⚠️ Invalid token_id: {token_id}")
+            return None
+        
         url = f"{self.clob_api}/book"
         params = {"token_id": token_id}
         
@@ -99,11 +147,77 @@ class PolymarketTrader:
             response = requests.get(url, params=params, timeout=10)
             response.raise_for_status()
             return response.json()
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
+                logging.debug(f"Order book not found for token: {token_id[:20]}...")
+            else:
+                logging.error(f"HTTP error fetching order book: {e}")
+            return None
         except Exception as e:
             logging.error(f"Error fetching order book: {e}")
             return None
     
-    def detect_large_orders(self, token_id: str, market_id: str, outcome: str):
+    def extract_token_ids(self, market: Dict) -> List[str]:
+        """
+        Extract valid token IDs from market data.
+        Handles different API response formats.
+        """
+        token_ids = []
+        
+        # Try different possible field names and formats
+        possible_fields = ['clobTokenIds', 'tokens', 'tokenIds']
+        
+        for field in possible_fields:
+            if field in market:
+                data = market[field]
+                
+                # If it's a string, try to parse as JSON
+                if isinstance(data, str):
+                    try:
+                        parsed = json.loads(data)
+                        if isinstance(parsed, list):
+                            token_ids = parsed
+                            break
+                    except json.JSONDecodeError:
+                        continue
+                
+                # If it's already a list
+                elif isinstance(data, list):
+                    token_ids = data
+                    break
+        
+        # Validate token IDs (should be alphanumeric strings > 10 chars)
+        valid_token_ids = []
+        for tid in token_ids:
+            if isinstance(tid, str) and len(tid) > 10 and tid.replace('-', '').replace('_', '').isalnum():
+                valid_token_ids.append(tid)
+            else:
+                logging.debug(f"Skipping invalid token_id: {tid}")
+        
+        return valid_token_ids
+    
+    def extract_outcomes(self, market: Dict) -> List[str]:
+        """
+        Extract outcomes from market data, handling JSON strings.
+        """
+        outcomes_data = market.get('outcomes', [])
+        
+        # If it's a string, try to parse as JSON
+        if isinstance(outcomes_data, str):
+            try:
+                parsed = json.loads(outcomes_data)
+                if isinstance(parsed, list):
+                    return [str(o) for o in parsed]
+            except json.JSONDecodeError:
+                return ['Unknown']
+        
+        # If it's already a list
+        elif isinstance(outcomes_data, list):
+            return [str(o) for o in outcomes_data]
+        
+        return ['Unknown']
+    
+    def detect_large_orders(self, token_id: str, market_id: str, outcome: str, question: str):
         """Detect and log large orders"""
         book = self.get_order_book(token_id)
         
@@ -115,20 +229,24 @@ class PolymarketTrader:
         # Check bids and asks
         for side, orders in [('BUY', book.get('bids', [])), ('SELL', book.get('asks', []))]:
             for order in orders:
-                price = float(order.get('price', 0))
-                size = float(order.get('size', 0))
-                value = price * size
-                
-                if value >= threshold:
-                    self.log_large_order(
-                        market_id, token_id, side, 
-                        price, size, value, outcome
-                    )
-                    log_msg = f"🔔 Large {side} order: {outcome} - {size:.0f} @ ${price:.4f} (${value:,.0f})"
-                    logging.info(log_msg)
-                    self.logs.append(log_msg)
+                try:
+                    price = float(order.get('price', 0))
+                    size = float(order.get('size', 0))
+                    value = price * size
+                    
+                    if value >= threshold:
+                        self.log_large_order(
+                            market_id, token_id, side, 
+                            price, size, value, outcome, question
+                        )
+                        log_msg = f"🔔 Large {side} order: {outcome} - {size:.0f} @ ${price:.4f} (${value:,.0f}) [{question[:40]}...]"
+                        logging.info(log_msg)
+                        self.logs.append(log_msg)
+                except (ValueError, TypeError) as e:
+                    logging.warning(f"Error parsing order: {e}")
+                    continue
     
-    def log_large_order(self, market_id, token_id, side, price, size, value, outcome):
+    def log_large_order(self, market_id, token_id, side, price, size, value, outcome, question):
         """Log large order to CSV"""
         order_data = {
             'timestamp': datetime.now().isoformat(),
@@ -138,7 +256,8 @@ class PolymarketTrader:
             'price': price,
             'size': size,
             'total_value': value,
-            'outcome': outcome
+            'outcome': outcome,
+            'question': question
         }
         
         try:
@@ -185,21 +304,49 @@ class PolymarketTrader:
         """Main monitoring loop"""
         logging.info("🚀 Starting monitoring loop...")
         
+        loop_count = 0
+        
         while self.is_running:
             try:
                 markets = self.get_markets()
                 
-                for market in markets[:5]:  # Monitor top 5
-                    if 'clobTokenIds' not in market:
+                if not markets:
+                    logging.warning("⚠️ No active markets found, waiting 60 seconds...")
+                    time.sleep(60)
+                    continue
+                
+                markets_processed = 0
+                orders_found = 0
+                
+                for market in markets[:10]:  # Monitor top 10 active markets
+                    # Extract token IDs and outcomes
+                    token_ids = self.extract_token_ids(market)
+                    outcomes = self.extract_outcomes(market)
+                    
+                    if not token_ids:
                         continue
                     
-                    market_id = market.get('id')
-                    token_ids = market['clobTokenIds']
-                    outcomes = market.get('outcomes', [])
+                    market_id = market.get('id', 'unknown')
                     question = market.get('question', 'N/A')
                     
+                    # Ensure we have matching outcomes for token_ids
+                    if len(outcomes) < len(token_ids):
+                        outcomes.extend(['Unknown'] * (len(token_ids) - len(outcomes)))
+                    
+                    # Process each token
                     for token_id, outcome in zip(token_ids, outcomes):
-                        self.detect_large_orders(token_id, market_id, outcome)
+                        orders_before = len(self.logs)
+                        self.detect_large_orders(token_id, market_id, outcome, question)
+                        orders_after = len(self.logs)
+                        
+                        if orders_after > orders_before:
+                            orders_found += (orders_after - orders_before)
+                        
+                        markets_processed += 1
+                
+                loop_count += 1
+                if loop_count % 6 == 0:  # Log every 60 seconds (6 loops * 10 sec)
+                    logging.info(f"✅ Monitoring active - processed {markets_processed} tokens, found {orders_found} large orders this cycle")
                 
                 time.sleep(10)
                 
