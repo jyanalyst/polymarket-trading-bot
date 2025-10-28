@@ -1,7 +1,7 @@
 # File: requirements.txt
-streamlit==1.31.0
-pandas==2.1.4
-plotly==5.18.0
-requests==2.31.0
-py-clob-client==0.24.0
-python-telegram-bot==20.7
+streamlit
+pandas
+plotly
+requests
+py-clob-client
+python-telegram-bot
