@@ -118,39 +118,11 @@ stats = st.session_state.bot.get_stats()
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
-    st.subheader("🔔 Recent Large Orders")
-    
-    # Read from CSV
-    try:
-        if large_orders_file.exists():
-            df_orders = pd.read_csv(large_orders_file)
-            
-            if not df_orders.empty:
-                # Get last 20 orders
-                df_orders = df_orders.tail(20).sort_values('timestamp', ascending=False)
-                
-                # Format columns for display
-                df_display = df_orders[['timestamp', 'outcome', 'side', 'price', 'size', 'total_value']].copy()
-                df_display.columns = ['Time', 'Outcome', 'Side', 'Price', 'Size', 'Value']
-                
-                # Format timestamp
-                df_display['Time'] = pd.to_datetime(df_display['Time']).dt.strftime('%H:%M:%S')
-                df_display['Outcome'] = df_display['Outcome'].apply(lambda x: str(x)[:15] if pd.notna(x) else 'N/A')
-                df_display['Price'] = df_display['Price'].apply(lambda x: f"${x:.4f}")
-                df_display['Size'] = df_display['Size'].apply(lambda x: f"{x:.0f}")
-                df_display['Value'] = df_display['Value'].apply(lambda x: f"${x:,.0f}")
-                
-                st.dataframe(
-                    df_display,
-                    hide_index=True,
-                    use_container_width=True
-                )
-            else:
-                st.info("No large orders detected yet")
-        else:
-            st.info("No large orders detected yet")
-    except Exception as e:
-        st.error(f"Error loading orders: {e}")
+    st.metric(
+        "Large Orders Detected",
+        stats['total_large_orders'],
+        delta=None
+    )
 
 with col2:
     st.metric(
@@ -168,8 +140,8 @@ with col3:
 
 with col4:
     st.metric(
-        "Uptime",
-        "Live" if stats['is_running'] else "Offline",
+        "Signals Generated",
+        len(stats.get('recent_signals', [])),
         delta=None
     )
 
@@ -190,12 +162,14 @@ with col1:
                 # Get last 20 orders
                 df_orders = df_orders.tail(20).sort_values('timestamp', ascending=False)
                 
-                # Format columns for display
-                df_display = df_orders[['timestamp', 'side', 'price', 'size', 'total_value']].copy()
-                df_display.columns = ['Time', 'Side', 'Price', 'Size', 'Value']
-                
+                # Format columns for display - include question and outcome
+                df_display = df_orders[['timestamp', 'question', 'outcome', 'side', 'price', 'size', 'total_value']].copy()
+                df_display.columns = ['Time', 'Market Question', 'Outcome', 'Side', 'Price', 'Size', 'Value']
+
                 # Format timestamp
                 df_display['Time'] = pd.to_datetime(df_display['Time']).dt.strftime('%H:%M:%S')
+                df_display['Market Question'] = df_display['Market Question'].apply(lambda x: str(x)[:30] + '...' if len(str(x)) > 30 else str(x))
+                df_display['Outcome'] = df_display['Outcome'].apply(lambda x: str(x)[:15] if pd.notna(x) else 'N/A')
                 df_display['Price'] = df_display['Price'].apply(lambda x: f"${x:.4f}")
                 df_display['Size'] = df_display['Size'].apply(lambda x: f"{x:.0f}")
                 df_display['Value'] = df_display['Value'].apply(lambda x: f"${x:,.0f}")
@@ -203,7 +177,7 @@ with col1:
                 st.dataframe(
                     df_display,
                     hide_index=True,
-                    use_container_width=True
+                    width='stretch'
                 )
             else:
                 st.info("No large orders detected yet")
@@ -236,7 +210,7 @@ with col2:
                 st.dataframe(
                     df_display,
                     hide_index=True,
-                    use_container_width=True
+                    width='stretch'
                 )
             else:
                 st.info("No trades executed yet")
@@ -244,6 +218,69 @@ with col2:
             st.info("No trades executed yet")
     except Exception as e:
         st.error(f"Error loading trades: {e}")
+
+st.markdown("---")
+
+# Signals section
+st.subheader("🚨 Trading Signals")
+
+try:
+    recent_signals = stats.get('recent_signals', [])
+
+    if recent_signals:
+        # Convert to DataFrame for better display
+        df_signals = pd.DataFrame(recent_signals)
+
+        if not df_signals.empty:
+            # Format the dataframe
+            df_display = df_signals[['timestamp', 'type', 'strength', 'outcome', 'price', 'acceleration', 'velocity', 'confidence']].copy()
+            df_display.columns = ['Time', 'Signal Type', 'Strength', 'Outcome', 'Price', 'Acceleration', 'Velocity', 'Confidence']
+
+            # Format timestamp
+            df_display['Time'] = pd.to_datetime(df_display['Time']).dt.strftime('%H:%M:%S')
+            df_display['Price'] = df_display['Price'].apply(lambda x: f"${x:.4f}")
+            df_display['Acceleration'] = df_display['Acceleration'].apply(lambda x: f"{x:.6f}")
+            df_display['Velocity'] = df_display['Velocity'].apply(lambda x: f"{x:.6f}")
+
+            # Add color coding for signal types
+            def color_signal_type(val):
+                if val == 'STRONG_BUY':
+                    return 'background-color: #d4edda; color: #155724'
+                elif val == 'STRONG_SELL':
+                    return 'background-color: #f8d7da; color: #721c24'
+                elif val == 'REVERSAL_WARNING':
+                    return 'background-color: #fff3cd; color: #856404'
+                elif val == 'ACCELERATION_SPIKE':
+                    return 'background-color: #f8f9fa; color: #495057; font-weight: bold'
+                return ''
+
+            styled_df = df_display.style.applymap(color_signal_type, subset=['Signal Type'])
+
+            st.dataframe(
+                styled_df,
+                hide_index=True,
+                width='stretch'
+            )
+
+            # Show signal details in expandable sections
+            with st.expander("📋 Signal Details", expanded=False):
+                for i, signal in enumerate(recent_signals[-5:]):  # Show last 5 signals
+                    st.markdown(f"**Signal {i+1}: {signal['type']} - {signal['outcome']}**")
+                    st.write(f"- Price: ${signal['price']:.4f}")
+                    st.write(f"- Acceleration: {signal['acceleration']:.6f}")
+                    st.write(f"- Velocity: {signal['velocity']:.6f}")
+                    st.write(f"- Confidence: {signal['confidence']}")
+                    st.write(f"- Reason: {signal['reason']}")
+                    st.write(f"- Question: {signal['question'][:100]}...")
+                    if i < len(recent_signals[-5:]) - 1:
+                        st.markdown("---")
+        else:
+            st.info("No signals generated yet")
+    else:
+        st.info("No signals generated yet")
+
+except Exception as e:
+    st.error(f"Error loading signals: {e}")
 
 st.markdown("---")
 
@@ -279,7 +316,7 @@ with col1:
                     title='Large Orders per Day',
                     labels={'count': 'Number of Orders', 'date': 'Date'}
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig)
             else:
                 st.info("Not enough data for chart")
         else:
@@ -313,7 +350,7 @@ with col2:
                     title='Total Order Value per Day',
                     labels={'total_value': 'Value ($)', 'date': 'Date'}
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig)
             else:
                 st.info("Not enough data for chart")
         else:
